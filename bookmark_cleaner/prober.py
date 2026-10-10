@@ -50,12 +50,11 @@ async def probe_single_url(
                     # 4xx 状态码通常是永久性错误，不重试
                     if 400 <= resp.status < 500:
                         return bookmark, False, f"HTTP {resp.status}"
-            except aiohttp.ClientResponseError as e:
-                if e.status == 405:
-                    pass  # 顺利进入阶段 2
-                elif 400 <= e.status < 500:
-                    return bookmark, False, f"HTTP {e.status}"
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                # HEAD 阶段网络/协议错误，降级进入阶段 2 GET 探活
+                pass
             except Exception:
+                # 其他异常同样降级进入 GET 探活
                 pass
 
             # 阶段 2: 降级尝试标准 GET 请求

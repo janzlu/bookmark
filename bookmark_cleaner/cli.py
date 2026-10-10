@@ -132,6 +132,71 @@ class BookmarkWorkflow:
             print(f"[!] 错误: 无权读取或备份书签文件: {self.bookmark_path}")
             sys.exit(1)
 
+    def _stage_load_and_dedup(self) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        """阶段 2 & 3: 读取书签、同步 ID 并规范化去重"""
+        self.data = load_bookmarks(self.bookmark_path)
+        bookmark_bar = self.data.get("roots", {}).get("bookmark_bar", {})
+        flat_list = flatten_bookmarks(bookmark_bar, self.id_manager)
+        print(f"[*] 扫描到书签栏原生书签数量: {len(flat_list)} 个 (最大 ID: {self.id_manager.max_id})")
+
+        deduped = normalize_and_deduplicate(flat_list)
+        print(f"[*] URL 规范化过滤去重完成，待处理项: {len(deduped)} 个")
+        return self.data, deduped
+
+    async def _stage_probe(
+        self,
+        deduped: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """阶段 4: 异步并发探活"""
+        print(f"[*] 正在并发检测链接可用性 (并发限制: {self.max_concurrency})...")
+        alive_list, dead_list = await run_health_check(
+            deduped,
+            max_concurrency=self.max_concurrency,
+            timeout_seconds=self.timeout_seconds,
+            ssl_verify=self.ssl_verify
+        )
+        print(f"[+] 存活链接: {len(alive_list)} | [x] 异常链接: {len(dead_list)}")
+        return alive_list, dead_list
+
+    def _stage_classify(
+        self,
+        work_list: List[Dict[str, Any]]
+    ) -> List[Tuple[Dict[str, Any], str]]:
+        """阶段 5: LLM 语义聚类"""
+        print(f"\n[*] 开始大模型批量语义分类 (模型: {self.model_name})...")
+
+        def progress_log(start_idx: int, end_idx: int) -> None:
+            print(f"    - 处理进度: {start_idx} ~ {end_idx} / {len(work_list)}")
+
+        return self.classifier.classify_all(
+            work_list,
+            batch_size=self.batch_size,
+            progress_callback=progress_log
+        )
+
+    def _stage_reconstruct_and_save(
+        self,
+        classified_pairs: List[Tuple[Dict[str, Any], str]],
+        dead_list: List[Dict[str, Any]],
+        action: str
+    ) -> None:
+        """阶段 6: 树重构与安全持久化"""
+        print("[*] 正在重构书签栏目录树...")
+        new_children = assemble_tree(classified_pairs, self.id_manager)
+
+        if action == "archive" and dead_list:
+            archive_folder = create_archive_folder(dead_list, self.id_manager)
+            new_children.append(archive_folder)
+            print(f"[+] 已创建「⚠️ 失效书签归档」文件夹，收录 {len(dead_list)} 个节点")
+
+        # 确保根节点完备性
+        roots = self.data.setdefault("roots", {})
+        bookmark_bar = roots.setdefault("bookmark_bar", {})
+        bookmark_bar["children"] = new_children
+        bookmark_bar["date_modified"] = get_chrome_timestamp()
+
+        save_bookmarks_atomic(self.bookmark_path, self.data)
+
     async def execute(
         self,
         dead_action_override: str | None = None,
@@ -154,65 +219,21 @@ class BookmarkWorkflow:
         # 1. 备份数据
         self.backup_database()
 
-        # 2. 读取书签并同步 ID
-        self.data = load_bookmarks(self.bookmark_path)
-        bookmark_bar = self.data.get("roots", {}).get("bookmark_bar", {})
-        flat_list = flatten_bookmarks(bookmark_bar, self.id_manager)
-        print(f"[*] 扫描到书签栏原生书签数量: {len(flat_list)} 个 (最大 ID: {self.id_manager.max_id})")
+        # 2 & 3. 读取书签并去重
+        _, deduped = self._stage_load_and_dedup()
 
-        # 3. 规范化与去重
-        deduped = normalize_and_deduplicate(flat_list)
-        print(f"[*] URL 规范化过滤去重完成，待处理项: {len(deduped)} 个")
-
-        # 4. 异步并发探活
-        print(f"[*] 正在并发检测链接可用性 (并发限制: {self.max_concurrency})...")
-        alive_list, dead_list = await run_health_check(
-            deduped,
-            max_concurrency=self.max_concurrency,
-            timeout_seconds=self.timeout_seconds,
-            ssl_verify=self.ssl_verify
-        )
-        print(f"[+] 存活链接: {len(alive_list)} | [x] 异常链接: {len(dead_list)}")
+        # 4. 探活
+        alive_list, dead_list = await self._stage_probe(deduped)
 
         # 5. 交互决策
         action = prompt_dead_link_action(dead_list, auto_choice=dead_action_override)
-
-        work_list = list(alive_list)
-        if action == "keep":
-            work_list.extend(dead_list)
+        work_list = list(alive_list) + (list(dead_list) if action == "keep" else [])
 
         # 6. LLM 语义聚类
-        print(f"\n[*] 开始大模型批量语义分类 (模型: {self.model_name})...")
+        classified_pairs = self._stage_classify(work_list)
 
-        def progress_log(start_idx: int, end_idx: int) -> None:
-            print(f"    - 处理进度: {start_idx} ~ {end_idx} / {len(work_list)}")
-
-        classified_pairs = self.classifier.classify_all(
-            work_list,
-            batch_size=self.batch_size,
-            progress_callback=progress_log
-        )
-
-        # 7. 重建目录树
-        print("[*] 正在重构书签栏目录树...")
-        new_children = assemble_tree(classified_pairs, self.id_manager)
-
-        # 处理归档节点
-        if action == "archive" and dead_list:
-            archive_folder = create_archive_folder(dead_list, self.id_manager)
-            new_children.append(archive_folder)
-            print(f"[+] 已创建「⚠️ 失效书签归档」文件夹，收录 {len(dead_list)} 个节点")
-
-        # 8. 写回书签文件
-        if "roots" not in self.data:
-            self.data["roots"] = {}
-        if "bookmark_bar" not in self.data["roots"]:
-            self.data["roots"]["bookmark_bar"] = {}
-
-        self.data["roots"]["bookmark_bar"]["children"] = new_children
-        self.data["roots"]["bookmark_bar"]["date_modified"] = get_chrome_timestamp()
-
-        save_bookmarks_atomic(self.bookmark_path, self.data)
+        # 7 & 8. 重构与保存
+        self._stage_reconstruct_and_save(classified_pairs, dead_list, action)
 
         print("\n" + "=" * 60)
         print("[✓] 书签全流程整理完成！重新打开 Chrome 即可生效。")
