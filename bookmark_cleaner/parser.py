@@ -23,9 +23,8 @@ class IdManager:
         except (ValueError, TypeError):
             pass
 
-        if node.get("type") == "folder":
-            for child in node.get("children", []):
-                self.sync(child)
+        for child in node.get("children", []):
+            self.sync(child)
 
     def allocate(self) -> str:
         """分配全新的全局唯一 ID"""

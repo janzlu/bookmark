@@ -24,6 +24,7 @@ from .storage import (
     load_bookmarks,
     restore_backup,
     save_bookmarks_atomic,
+    save_deleted_audit_log,
 )
 
 from .server import BookmarkServer, create_app
@@ -46,6 +47,7 @@ __all__ = [
     "load_bookmarks",
     "restore_backup",
     "save_bookmarks_atomic",
+    "save_deleted_audit_log",
     "get_chrome_timestamp",
     "get_default_bookmark_path",
     "API_KEY",

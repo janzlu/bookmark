@@ -5,10 +5,25 @@
 """
 
 import json
+import re
 import time
 from typing import Any, Callable, Dict, List, Tuple
 from openai import OpenAI
 from .config import PRESET_CATEGORIES
+
+
+def extract_json_object(content: str) -> Dict[str, Any]:
+    """从大模型返回内容中鲁棒提取 JSON 对象，兼容思考模型（<think>）及 Markdown 格式"""
+    if not content:
+        return {}
+    clean = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    if "```" in clean:
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean)
+        if m:
+            clean = m.group(1).strip()
+    if "{" in clean and "}" in clean:
+        clean = clean[clean.find("{"):clean.rfind("}") + 1]
+    return json.loads(clean)
 
 
 class BookmarkClassifier:
@@ -82,7 +97,7 @@ class BookmarkClassifier:
                 )
 
                 content = response.choices[0].message.content or "{}"
-                data = json.loads(content)
+                data = extract_json_object(content)
 
                 # 兼容模型外层包裹情况，例如 {"bookmarks": {...}} 或 {"categories": {...}}
                 if "bookmarks" in data and isinstance(data["bookmarks"], dict):

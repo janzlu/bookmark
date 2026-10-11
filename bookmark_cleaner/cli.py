@@ -6,12 +6,16 @@
 
 import argparse
 import asyncio
+import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .builder import assemble_tree, create_archive_folder
 from .classifier import BookmarkClassifier
+from .cli_args import build_arg_parser
+from .cli_prompts import prompt_dead_link_action
 from .config import (
     API_KEY,
     BASE_URL,
@@ -26,53 +30,12 @@ from .config import (
 )
 from .parser import IdManager, flatten_bookmarks, normalize_and_deduplicate
 from .prober import run_health_check
-from .storage import backup_database, load_bookmarks, save_bookmarks_atomic
-
-
-def prompt_dead_link_action(
-    dead_bookmarks: List[Dict[str, Any]],
-    auto_choice: str | None = None
-) -> str:
-    """
-    终端高亮展示失效链接明细，并交互式获取用户处置决策。
-    返回值: 'archive' | 'delete' | 'keep'
-    """
-    if not dead_bookmarks:
-        print("\n[✓] 链接探活全部通过，未检测到死链。\n")
-        return "keep"
-
-    if auto_choice in ("archive", "delete", "keep"):
-        print(f"\n[*] 已通过参数自动指定处置策略: {auto_choice}")
-        return auto_choice
-
-    print("\n" + "=" * 80)
-    print(f"⚠️  共识别出 {len(dead_bookmarks)} 个疑似无法访问的书签：")
-    print("=" * 80)
-
-    for idx, bm in enumerate(dead_bookmarks, 1):
-        reason = bm.get("_dead_reason", "未知")
-        title = bm.get("name") or "(无标题)"
-        url = bm.get("url", "")
-        print(f"[{idx:02d}] 异常状态: \033[31m{reason:<18}\033[0m | 标题: {title}")
-        print(f"     链接地址: {url}")
-
-    print("=" * 80)
-    print("请选择对上述失效书签的处置方式：")
-    print("  [1] 自动归档（默认：分类存入「⚠️ 失效书签归档」独立文件夹）")
-    print("  [2] 直接剔除（从整理结果中彻底移除）")
-    print("  [3] 忽略异常（保留并正常随同分类）")
-
-    try:
-        choice = input("请输入选项编号 [1/2/3] (直接回车默认 1): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\n[*] 检测到中断，默认选择自动归档。")
-        return "archive"
-
-    if choice == "2":
-        return "delete"
-    elif choice == "3":
-        return "keep"
-    return "archive"
+from .storage import (
+    backup_database,
+    load_bookmarks,
+    save_bookmarks_atomic,
+    save_deleted_audit_log,
+)
 
 
 class BookmarkWorkflow:
@@ -188,6 +151,10 @@ class BookmarkWorkflow:
             archive_folder = create_archive_folder(dead_list, self.id_manager)
             new_children.append(archive_folder)
             print(f"[+] 已创建「⚠️ 失效书签归档」文件夹，收录 {len(dead_list)} 个节点")
+        elif action == "delete" and dead_list:
+            del_audit_path = save_deleted_audit_log(self.bookmark_path, dead_list)
+            if del_audit_path:
+                print(f"[+] 物理删除审计文件已生成: {del_audit_path}")
 
         # 确保根节点完备性
         roots = self.data.setdefault("roots", {})
@@ -240,78 +207,6 @@ class BookmarkWorkflow:
         print("=" * 60)
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    """构建命令行参数解析器"""
-    parser = argparse.ArgumentParser(
-        description="Chrome 书签自动整理与健康检查工具"
-    )
-    parser.add_argument(
-        "--path",
-        type=Path,
-        default=get_default_bookmark_path(),
-        help="Chrome 书签文件路径（默认自动匹配当前操作系统）"
-    )
-    parser.add_argument(
-        "--action",
-        choices=["archive", "delete", "keep"],
-        default=None,
-        help="对失效书签的预设处置方式 (archive/delete/keep)"
-    )
-    parser.add_argument(
-        "-y", "--yes",
-        action="store_true",
-        help="跳过执行前的退出 Chrome 确认交互"
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=BATCH_SIZE,
-        help=f"LLM 批处理切片大小 (默认: {BATCH_SIZE})"
-    )
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=MAX_CONCURRENT_REQUESTS,
-        help=f"最大异步网络并发数 (默认: {MAX_CONCURRENT_REQUESTS})"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=MODEL_NAME,
-        help=f"大模型名称 (默认: {MODEL_NAME})"
-    )
-    parser.add_argument(
-        "--base-url",
-        type=str,
-        default=BASE_URL,
-        help=f"OpenAI 兼容接口 Base URL (默认: {BASE_URL})"
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=REQUEST_TIMEOUT_SECONDS,
-        help=f"探活请求超时时间秒数 (默认: {REQUEST_TIMEOUT_SECONDS})"
-    )
-    parser.add_argument(
-        "--ssl-verify",
-        action="store_true",
-        default=DEFAULT_SSL_VERIFY,
-        help="启用严格 SSL 证书验证 (默认关闭以避免误判内网自建服务)"
-    )
-    parser.add_argument(
-        "--ui",
-        action="store_true",
-        help="启动 Web UI 智能管理工作台并在浏览器中访问"
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8080,
-        help="Web UI 服务端口 (默认: 8080)"
-    )
-    return parser
-
-
 def main() -> None:
     """CLI 入口函数"""
     parser = build_arg_parser()
@@ -341,3 +236,7 @@ def main() -> None:
             skip_confirm=args.yes
         )
     )
+
+
+if __name__ == "__main__":
+    main()

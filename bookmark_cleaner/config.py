@@ -15,7 +15,7 @@ def get_default_base_url() -> str:
     """获取 LLM 默认 BASE_URL，兼容 OPENAI_BASE_URL 和 OPENAI_API_BASE"""
     for key in ("OPENAI_BASE_URL", "OPENAI_API_BASE"):
         val = os.getenv(key)
-        if val is not None and val.strip():
+        if val and val.strip():
             return val.strip()
     return "https://api.openai.com/v1"
 
@@ -23,7 +23,7 @@ def get_default_base_url() -> str:
 def get_default_model(base_url: str) -> str:
     """根据 BASE_URL 智能提供默认模型名称"""
     env_model = os.getenv("MODEL_NAME")
-    if env_model is not None and env_model.strip():
+    if env_model and env_model.strip():
         return env_model.strip()
     if "minimax" in base_url.lower():
         return "MiniMax-M2.7"
@@ -36,10 +36,30 @@ BASE_URL: str = get_default_base_url()
 API_KEY: str = (os.getenv("OPENAI_API_KEY") or "").strip()
 MODEL_NAME: str = get_default_model(BASE_URL)
 
+def _safe_int_env(key: str, default: int) -> int:
+    val = os.getenv(key)
+    if not val:
+        return default
+    try:
+        return int(val.strip())
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float_env(key: str, default: float) -> float:
+    val = os.getenv(key)
+    if not val:
+        return default
+    try:
+        return float(val.strip())
+    except (ValueError, TypeError):
+        return default
+
+
 # 并发与检测参数
-MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "30"))
-REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "7.0"))
-BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "25"))
+MAX_CONCURRENT_REQUESTS: int = _safe_int_env("MAX_CONCURRENT_REQUESTS", 30)
+REQUEST_TIMEOUT_SECONDS: float = _safe_float_env("REQUEST_TIMEOUT_SECONDS", 7.0)
+BATCH_SIZE: int = _safe_int_env("BATCH_SIZE", 25)
 DEFAULT_SSL_VERIFY: bool = os.getenv("SSL_VERIFY", "false").lower() in ("1", "true", "yes")
 
 # 预设推荐分类树

@@ -275,62 +275,64 @@ python -m bookmark_cleaner.cli --path "/path/to/Bookmarks" --model "deepseek-cha
 ================================================================================
 请选择对上述失效书签的处置方式：
   [1] 自动归档（默认：分类存入「⚠️ 失效书签归档」独立文件夹）
-  [2] 直接剔除（从整理结果中彻底移除）
+  [2] 直接剔除（从整理结果中彻底移除，需输入 YES 人工核验）
   [3] 忽略异常（保留并正常随同分类）
-请输入选项编号 [1/2/3] (直接回车默认 1): 1
+请输入选项编号 [1/2/3] (直接回车默认 1): 2
+
+⚠️ 【人工安全核验警示】物理删除是不可逆操作，所选书签将从 Chrome 中彻底移除！
+若确认彻底物理删除，请手动输入 'YES' (输入其他任意内容将自动降级为安全归档): YES
+[+] 物理删除审计日志已生成: Bookmarks.deleted_20261011_102000.json
 ```
 
-### 步骤 4：重新启动 Chrome 验证
-处理完成后，重新启动 Chrome 浏览器，书签栏已重构为结构清晰的树形分类，失效书签已被安全归纳在「⚠️ 失效书签归档」文件夹中。
+### 步骤 4：Web UI 可视化管理界面批量核验与物理删除
+在 Web UI 模式下（启动 `python bookmark_manager.py --ui`），支持更精细的批量审计流程：
+1. **分类筛选与多选**：支持按 `404/死链`、`连接超时`、`SSL证书异常` 等维度筛选，支持全选/单选。
+2. **批量人工安全核验弹窗**：点击「批量彻底物理删除」将调出安全核验弹窗，列出待删除书签明细，并提供新标签页直达测试链接；必须勾选「我已逐项人工核验」免责确认后方可提交。
+3. **退路保障**：随时可一键「全部转为安全归档」无损保底。
+4. **不可逆专有审计**：物理删除完成后，除强制备份 `Bookmarks.bak_*` 外，同级目录还会生成 `Bookmarks.deleted_<timestamp>.json` 记录删除明细以供全流程溯源。
+
+### 步骤 5：重新启动 Chrome 验证
+处理完成后，重新启动 Chrome 浏览器，书签栏已重构为结构清晰的树形分类，失效书签已被安全归纳在「⚠️ 失效书签归档」文件夹中（或按核验结果物理剔除）。
 
 ---
 
 ## 七、代码模块架构与 API 参考
 
-工程代码严格恪守低耦合高内聚设计，各模块职责明确，单文件行数均控制在合理范围内：
+工程代码严格恪守低耦合高内聚设计，各模块职责明确，单文件行数均控制在合理范围内（原则上不超过 300~500 行）：
 
 ```text
 bookmark/
 ├── bookmark_cleaner/
-│   ├── __init__.py      # 包导出入口 (54 行)
-│   ├── config.py        # 环境读取、时间戳计算与路径适配 (73 行)
-│   ├── storage.py       # 快照备份、配额维护与原子持久化 (95 行)
-│   ├── parser.py        # 扁平化提取、URL 规范化去重与 ID 管理 (94 行)
-│   ├── prober.py        # 异步并发双阶段探活引擎与重试 (124 行)
-│   ├── classifier.py    # LLM 语义聚类、重试与降级保护 (131 行)
-│   ├── builder.py       # 多层目录树重构与归档节点装配 (81 行)
-│   └── cli.py           # 六阶段流水线调度器与 CLI (318 行)
-├── bookmark_manager.py  # 顶层直接启动脚本与兼容包装类 (93 行)
+│   ├── __init__.py       # 包导出入口与版本声明 (60 行)
+│   ├── config.py         # 环境读取容错、WebKit 时间戳与路径适配 (93 行)
+│   ├── storage.py        # 快照备份、原子覆写持久化与删除审计日志 (149 行)
+│   ├── parser.py         # 扁平化提取、URL 规范化去重与 ID 管理器 (94 行)
+│   ├── prober.py         # 异步并发双阶段探活引擎与退避 (135 行)
+│   ├── classifier.py     # LLM 语义聚类、重试与降级保护 (131 行)
+│   ├── builder.py        # 多层目录树重构与归档节点装配 (81 行)
+│   ├── server_helpers.py # Chrome 运行状态检测、备份列表与 SSE 工具 (60 行)
+│   ├── server_stream.py  # 探活与分类实时进度 SSE 流式推送 (150 行)
+│   ├── server.py         # Web 管理端核心 REST API 控制器 (301 行)
+│   ├── cli_args.py       # CLI 命令行参数解析器 (90 行)
+│   ├── cli_prompts.py    # CLI 交互提示与 YES 确认安全门禁 (76 行)
+│   └── cli.py            # 六阶段流水线编排器与主入口 (242 行)
+├── bookmark_manager.py   # 顶层直接启动脚本与兼容包装类 (99 行)
 ├── scripts/
-│   └── minimax_audit.py # MiniMax 独立交叉代码审计脚本 (80 行)
-├── tests/               # 完整单元测试与端到端集成测试 (498 行)
-└── docs/                # 本说明文档目录
+│   └── minimax_audit.py  # MiniMax 独立交叉代码审计脚本 (86 行)
+├── static/               # Web UI 前端管理工作台
+│   ├── index.html        # 现代化单页应用 HTML 结构 (416 行)
+│   ├── css/              # 玻璃质感与响应式模块样式 (551 行)
+│   └── js/               # API 封装、流水线调度与死链批量核验模块 (862 行)
+├── tests/                # 完整单元测试与端到端集成测试 (38 项测试用例)
+└── docs/                 # 项目详细功能及使用说明文档
 ```
 
-### Python API 编程式调用示例
+### 批量物理删除与人工安全核验机制
 
-开发者亦可在 Python 代码中直接导入模块使用：
-
-```python
-import asyncio
-from pathlib import Path
-from bookmark_cleaner import BookmarkWorkflow, get_default_bookmark_path
-
-async def run_custom_clean():
-    # 初始化工作流
-    workflow = BookmarkWorkflow(
-        bookmark_path=get_default_bookmark_path(),
-        model_name="MiniMax-M2.7",
-        batch_size=20,
-        max_concurrency=40
-    )
-    
-    # 执行流水线（指定自动归档并跳过确认）
-    await workflow.execute(dead_action_override="archive", skip_confirm=True)
-
-if __name__ == "__main__":
-    asyncio.run(run_custom_clean())
-```
+为了防止误删高价值书签，系统针对“物理删除”实现了严格的**双重安全门禁**与**溯源审计机制**：
+1. **人工逐项安全核验弹窗**：在 Web UI 勾选书签选择批量物理删除时，触发专用核验弹窗。弹窗列出待删清单、支持外链一键点击预览测试（↗）、要求勾选《已逐一核验确认所有选中书签均已彻底失效且不可恢复》风险确认门禁，并提供「降级为安全归档」逃生选项。
+2. **后端服务强拦截**：`/api/pipeline/apply` 接口对携带 `deleted_bookmarks` 的请求进行强制校验，若缺少 `manual_verified=True` 则返回 HTTP 400 拦截拒绝写入。
+3. **不可逆删除专有审计日志**：写入前除自动创建 `Bookmarks.bak_<timestamp>` 完整快照外，额外在书签同级目录生成 `Bookmarks.deleted_<timestamp>.json` 物理删除审计文件，完整记录删除时间、核验状态与被删书签详情，随时可溯源恢复。
 
 ---
 
@@ -374,18 +376,19 @@ pytest -v
 ```
 
 测试套件涵盖：
-- `test_storage.py`：备份生成、配额清理、原子刷盘写入与异常恢复。
+- `test_storage.py`：备份生成、配额维护、原子刷盘写入、空文件/损坏备份恢复拦截与 JSON 异常校验。
 - `test_parser.py`：节点递归提取、ID 自增单调性、保留 Query 参数的 URL 规范化与去重。
 - `test_prober.py`：HEAD 成功、401/403/429 特权放行、405 降级 GET、超时退避与空输入处理。
 - `test_builder.py`：单层/多层目录树嵌套构建、失效节点归档文件夹装配。
 - `test_classifier.py`：API Key 缺失降级、外层嵌套字典解析、网络异常重试退避。
-- `test_pipeline.py`：端到端六阶段全流程模拟执行与结构校验。
+- `test_server.py`：状态查询、SSE 流式推送、无核验物理删除拒绝（HTTP 400）、删除审计日志生成。
+- `test_pipeline.py`：端到端六阶段全流程模拟执行、批量物理删除流程与结构校验。
 
-机验指标：**24 项测试用例全部通过，退出码为 0**。
+机验指标：**38 项测试用例全部通过，退出码为 0**。
 
 ### 2. 运行 MiniMax 独立交叉代码审计
 项目内置针对真实代码质量红线的审计驱动脚本：
 ```bash
 python scripts/minimax_audit.py
 ```
-审计脚本自动提取所有核心模块源码，拉起 MiniMax 模型，依据**低耦合高内聚、单文件规模、交付真实性、健壮性与幂等性**四项硬性标准进行审查。
+审计脚本自动提取所有核心模块源码，拉起 MiniMax 模型，依据**低耦合高内聚、单文件规模、交付真实性、健壮性与幂等性**四项硬性标准进行审查，审计结论为**通过**。

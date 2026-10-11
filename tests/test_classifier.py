@@ -74,3 +74,28 @@ def test_classify_batch_exception_fallback():
     batch = [{"id": "99", "name": "Err", "url": "http://err.com"}]
     res = classifier.classify_single_batch(batch, max_retries=0)
     assert res == {"99": "其他/待整理"}
+
+
+def test_classify_batch_thinking_and_markdown():
+    classifier = BookmarkClassifier(
+        api_key="mock-key",
+        base_url="https://api.minimax.chat/v1",
+        model_name="MiniMax-M2.7"
+    )
+
+    mock_client = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = (
+        "<think>模型思考过程：将 GitHub 归类到技术研发</think>\n\n"
+        "```json\n"
+        '{"1": "技术研发/编程开发"}\n'
+        "```"
+    )
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    mock_client.chat.completions.create.return_value = mock_response
+    classifier._client = mock_client
+
+    batch = [{"id": "1", "name": "GitHub", "url": "https://github.com"}]
+    res = classifier.classify_single_batch(batch)
+    assert res == {"1": "技术研发/编程开发"}

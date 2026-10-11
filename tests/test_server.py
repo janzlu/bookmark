@@ -162,12 +162,13 @@ async def test_server_probe_stream(mock_bookmarks_file: Path):
     req.can_read_body = True
     req.json = AsyncMock(return_value={"limit": 5})
 
-    with patch("bookmark_cleaner.server.run_health_check", side_effect=mock_run_health_check):
+    with patch("bookmark_cleaner.server_stream.run_health_check", side_effect=mock_run_health_check):
         with patch.object(web.StreamResponse, "prepare", new_callable=AsyncMock):
-            with patch.object(web.StreamResponse, "write", new_callable=AsyncMock) as mock_write:
-                resp = await server.handle_probe_stream(req)
-                assert resp.status == 200
-                assert mock_write.call_count >= 2
+            with patch.object(web.StreamResponse, "drain", new_callable=AsyncMock):
+                with patch.object(web.StreamResponse, "write", new_callable=AsyncMock) as mock_write:
+                    resp = await server.handle_probe_stream(req)
+                    assert resp.status == 200
+                    assert mock_write.call_count >= 2
 
 
 @pytest.mark.asyncio
@@ -179,9 +180,107 @@ async def test_server_classify_stream(mock_bookmarks_file: Path):
         "bookmarks": [{"id": "2", "name": "Google", "url": "https://google.com"}]
     })
 
-    with patch("bookmark_cleaner.server.BookmarkClassifier.classify_single_batch", return_value={"2": "常用工具"}):
+    with patch("bookmark_cleaner.server_stream.BookmarkClassifier.classify_single_batch", return_value={"2": "常用工具"}):
         with patch.object(web.StreamResponse, "prepare", new_callable=AsyncMock):
-            with patch.object(web.StreamResponse, "write", new_callable=AsyncMock) as mock_write:
-                resp = await server.handle_classify_stream(req)
-                assert resp.status == 200
-                assert mock_write.call_count >= 2
+            with patch.object(web.StreamResponse, "drain", new_callable=AsyncMock):
+                with patch.object(web.StreamResponse, "write", new_callable=AsyncMock) as mock_write:
+                    resp = await server.handle_classify_stream(req)
+                    assert resp.status == 200
+                    assert mock_write.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_server_apply_batch_delete_without_verification_rejected(mock_bookmarks_file: Path):
+    server = BookmarkServer(bookmark_path=mock_bookmarks_file)
+
+    with patch("bookmark_cleaner.server.is_chrome_running", return_value=False):
+        req = MagicMock()
+        req.json = AsyncMock(return_value={
+            "classified": [],
+            "deleted_bookmarks": [
+                {"id": "4", "name": "Dead", "type": "url", "url": "https://dead.test"}
+            ],
+            "manual_verified": False
+        })
+        resp = await server.handle_apply(req)
+        assert resp.status == 400
+        data = json.loads(resp.body.decode())
+        assert "安全拦截" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_server_apply_batch_delete_verified_creates_audit_log(mock_bookmarks_file: Path):
+    server = BookmarkServer(bookmark_path=mock_bookmarks_file)
+
+    with patch("bookmark_cleaner.server.is_chrome_running", return_value=False):
+        req = MagicMock()
+        req.json = AsyncMock(return_value={
+            "classified": [
+                {
+                    "bookmark": {"id": "2", "name": "Google", "type": "url", "url": "https://google.com"},
+                    "category": "通用/搜索"
+                }
+            ],
+            "archived_bookmarks": [
+                {"id": "5", "name": "ArchiveMe", "type": "url", "url": "https://archive.me"}
+            ],
+            "deleted_bookmarks": [
+                {"id": "4", "name": "Dead", "type": "url", "url": "https://dead.test"}
+            ],
+            "manual_verified": True
+        })
+        resp = await server.handle_apply(req)
+        assert resp.status == 200
+        data = json.loads(resp.body.decode())
+        assert data["success"] is True
+        assert data["deleted_count"] == 1
+        assert data["archived_count"] == 1
+        assert data["deleted_audit_path"] is not None
+
+        # 验证审计日志文件真实创建且内容完整
+        audit_file = Path(data["deleted_audit_path"])
+        assert audit_file.exists()
+        audit_content = json.loads(audit_file.read_text(encoding="utf-8"))
+        assert audit_content["manual_verified"] is True
+        assert audit_content["count"] == 1
+        assert audit_content["deleted_bookmarks"][0]["url"] == "https://dead.test"
+
+        # 验证物理删除：读取重构后的书签文件，确认 Dead 不在树中，ArchiveMe 在归档文件夹中
+        saved_data = json.loads(mock_bookmarks_file.read_text(encoding="utf-8"))
+        bar_children = saved_data["roots"]["bookmark_bar"]["children"]
+        folder_names = [f["name"] for f in bar_children if f.get("type") == "folder"]
+        assert "⚠️ 失效书签归档" in folder_names
+        assert "通用" in folder_names
+
+        # 检查所有节点，确保 https://dead.test 已被物理抹除
+        all_urls = []
+        def collect_urls(node):
+            if node.get("type") == "url":
+                all_urls.append(node.get("url"))
+            for c in node.get("children", []):
+                collect_urls(c)
+        collect_urls(saved_data["roots"]["bookmark_bar"])
+        assert "https://dead.test" not in all_urls
+        assert "https://archive.me" in all_urls
+        assert "https://google.com" in all_urls
+
+
+@pytest.mark.asyncio
+async def test_server_restore_path_traversal_rejected(mock_bookmarks_file: Path):
+    server = BookmarkServer(bookmark_path=mock_bookmarks_file)
+
+    with patch("bookmark_cleaner.server.is_chrome_running", return_value=False):
+        # 1. 测试跨目录穿越
+        req_traversal = MagicMock()
+        req_traversal.json = AsyncMock(return_value={"filename": "../../etc/passwd"})
+        resp = await server.handle_restore(req_traversal)
+        assert resp.status == 400
+        data = json.loads(resp.body.decode())
+        assert "非法的备份文件名格式" in data["error"]
+
+        # 2. 测试非 Bookmarks.bak_ 前缀文件
+        req_fake = MagicMock()
+        req_fake.json = AsyncMock(return_value={"filename": "Bookmarks.deleted_123.json"})
+        resp_fake = await server.handle_restore(req_fake)
+        assert resp_fake.status == 400
+

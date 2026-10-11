@@ -8,7 +8,6 @@ document.addEventListener('DOMContentLoaded', () => {
     summary: null,
     probeResults: { alive: [], dead: [] },
     classifiedPairs: [],
-    deadAction: 'archive',
     isProbing: false,
     isClassifying: false
   };
@@ -26,13 +25,29 @@ document.addEventListener('DOMContentLoaded', () => {
     infoChrome: document.getElementById('info-chrome'),
     backupBody: document.getElementById('backup-table-body'),
     btnRunProbe: document.getElementById('btn-run-probe'),
+    probeSampleLimit: document.getElementById('probe-sample-limit'),
     probeStatusText: document.getElementById('probe-status-text'),
     probeProgressBar: document.getElementById('probe-progress-bar'),
     probePercent: document.getElementById('probe-status-percent'),
     probeLog: document.getElementById('probe-log-box'),
     auditDeadCount: document.getElementById('audit-dead-count'),
+    badgeArchivedCount: document.getElementById('badge-archived-count'),
+    badgeDeletedCount: document.getElementById('badge-deleted-count'),
+    badgeKeptCount: document.getElementById('badge-kept-count'),
+    deadFilterChips: document.getElementById('dead-filter-chips'),
+    filterCntAll: document.getElementById('filter-cnt-all'),
+    filterCnt404: document.getElementById('filter-cnt-404'),
+    filterCntTimeout: document.getElementById('filter-cnt-timeout'),
+    filterCntSsl: document.getElementById('filter-cnt-ssl'),
+    filterCntDelete: document.getElementById('filter-cnt-delete'),
+    selectAllDead: document.getElementById('select-all-dead'),
+    tableHeadCheckbox: document.getElementById('table-head-checkbox'),
+    selectedDeadCount: document.getElementById('selected-dead-count'),
+    btnBatchDelete: document.getElementById('btn-batch-delete'),
+    btnBatchArchive: document.getElementById('btn-batch-archive'),
+    btnBatchKeep: document.getElementById('btn-batch-keep'),
+    btnNextToClassify: document.getElementById('btn-next-to-classify'),
     deadLinksBody: document.getElementById('dead-links-body'),
-    selectBulkAction: document.getElementById('select-bulk-action'),
     btnRunClassify: document.getElementById('btn-run-classify'),
     classifyStatusText: document.getElementById('classify-status-text'),
     classifyProgressBar: document.getElementById('classify-progress-bar'),
@@ -41,6 +56,18 @@ document.addEventListener('DOMContentLoaded', () => {
     presetChips: document.getElementById('preset-chips'),
     treeContainer: document.getElementById('tree-preview-container'),
     chromeWarning: document.getElementById('chrome-running-warning'),
+    deleteWarningBox: document.getElementById('delete-warning-box'),
+    summaryDeleteCount: document.getElementById('summary-delete-count'),
+    batchDeleteModal: document.getElementById('batch-delete-modal'),
+    btnCloseDeleteModal: document.getElementById('btn-close-delete-modal'),
+    modalDeleteCount: document.getElementById('modal-delete-count'),
+    modalDeleteListBody: document.getElementById('modal-delete-list-body'),
+    modalSelectAll: document.getElementById('modal-select-all'),
+    chkManualVerifiedConfirm: document.getElementById('chk-manual-verified-confirm'),
+    btnModalDowngradeArchive: document.getElementById('btn-modal-downgrade-archive'),
+    btnModalCancel: document.getElementById('btn-modal-cancel'),
+    btnModalConfirmDelete: document.getElementById('btn-modal-confirm-delete'),
+    modalConfirmBtnCount: document.getElementById('modal-confirm-btn-count'),
     settingsModal: document.getElementById('settings-modal'),
     toastContainer: document.getElementById('toast-container')
   };
@@ -55,6 +82,9 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => toast.remove(), 250);
     }, 3500);
   }
+
+  // 初始化死链审计与核验模块
+  DeadLinksModule.init(elements, showToast);
 
   function setStep(stepNum) {
     state.currentStep = stepNum;
@@ -71,8 +101,6 @@ document.addEventListener('DOMContentLoaded', () => {
     line.className = `log-line ${colorClass}`;
     line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
     box.appendChild(line);
-
-    // 限制最大历史输出行数，避免大量节点拖慢页面渲染
     while (box.children.length > 120) {
       box.removeChild(box.firstChild);
     }
@@ -80,7 +108,12 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function escapeHtml(str) {
-    return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   // 1. 初始化系统状态
@@ -177,7 +210,9 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.probePercent.textContent = '0%';
 
     try {
-      await API.runProbeStream({}, (event) => {
+      const limitVal = elements.probeSampleLimit ? elements.probeSampleLimit.value : '20';
+      const payload = limitVal && limitVal !== 'all' ? { limit: parseInt(limitVal, 10) } : {};
+      await API.runProbeStream(payload, (event) => {
         if (event.type === 'progress') {
           const percent = Math.round((event.current / event.total) * 100);
           elements.probeProgressBar.style.width = `${percent}%`;
@@ -189,12 +224,11 @@ document.addEventListener('DOMContentLoaded', () => {
           appendLog(elements.probeLog, `[${mark} ${event.reason}] ${event.name} (${event.url})`, colorClass);
         } else if (event.type === 'complete') {
           state.probeResults = { alive: event.alive, dead: event.dead };
+          DeadLinksModule.setItems(event.dead);
           elements.probeProgressBar.style.width = '100%';
           elements.probePercent.textContent = '100%';
           elements.probeStatusText.textContent = `探活全部完成！存活: ${event.alive_count} | 失效: ${event.dead_count}`;
           appendLog(elements.probeLog, `[探活全部完成] 总计扫描: ${event.total_tested} | 存活: ${event.alive_count} | 失效: ${event.dead_count}`, 'text-info');
-
-          renderDeadLinks(event.dead);
           setTimeout(() => setStep(3), 900);
         }
       });
@@ -208,25 +242,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  function renderDeadLinks(deadList) {
-    elements.auditDeadCount.textContent = deadList.length;
-    if (!deadList.length) {
-      elements.deadLinksBody.innerHTML = '<tr><td colspan="3" class="text-accent">🎉 探活全部通过！未发现失效或死链书签。</td></tr>';
+  // 步骤 3 -> 步骤 4
+  elements.btnNextToClassify.addEventListener('click', () => {
+    const deletedItems = DeadLinksModule.getDeleted();
+    if (deletedItems.length > 0 && !DeadLinksModule.isVerified()) {
+      alert('安全拦截：存在标记为彻底删除的书签，必须先进行人工安全核验！');
+      DeadLinksModule.openVerifyModal(deletedItems);
       return;
     }
-
-    elements.deadLinksBody.innerHTML = deadList.map((bm, idx) => `
-      <tr>
-        <td><span class="status-badge badge-warning">${bm._dead_reason || '未知异常'}</span></td>
-        <td><strong>${escapeHtml(bm.name || '(无标题)')}</strong></td>
-        <td><code style="font-size:0.78rem;">${escapeHtml(bm.url || '')}</code></td>
-      </tr>
-    `).join('');
-  }
-
-  // 步骤 3 -> 步骤 4
-  document.getElementById('btn-next-to-classify').addEventListener('click', () => {
-    state.deadAction = elements.selectBulkAction.value;
     setStep(4);
   });
 
@@ -238,9 +261,9 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.btnRunClassify.textContent = 'AI 语义分类中...';
 
     let targets = [...state.probeResults.alive];
-    if (state.deadAction === 'keep') {
-      targets.push(...state.probeResults.dead);
-    }
+    const keptDead = DeadLinksModule.getKept();
+    targets.push(...keptDead);
+
     if (!targets.length && state.summary) {
       targets = state.summary.items;
     }
@@ -267,7 +290,7 @@ document.addEventListener('DOMContentLoaded', () => {
           elements.classifyStatusText.textContent = `分类完成！构建了 ${event.classified.length} 个分类映射。`;
           appendLog(elements.classifyLog, `[分类完成] 成功完成全量分类规划。`, 'text-info');
 
-          renderTreePreview(event.classified, state.probeResults.dead, state.deadAction);
+          renderTreePreview(event.classified);
           setTimeout(() => setStep(5), 900);
         }
       });
@@ -282,7 +305,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // 5. 目录树渲染
-  function renderTreePreview(classified, deadList, deadAction) {
+  function renderTreePreview(classified) {
     const tree = {};
 
     classified.forEach(item => {
@@ -291,11 +314,22 @@ document.addEventListener('DOMContentLoaded', () => {
       tree[cat].push(item.bookmark);
     });
 
-    if (deadAction === 'archive' && deadList && deadList.length) {
-      tree['⚠️ 失效书签归档'] = deadList;
+    const archivedList = DeadLinksModule.getArchived();
+    if (archivedList.length) {
+      tree['⚠️ 失效书签归档'] = archivedList;
     }
 
-    elements.treeContainer.innerHTML = Object.keys(tree).map(catPath => {
+    const deletedList = DeadLinksModule.getDeleted();
+    let deleteNoticeHtml = '';
+    if (deletedList.length) {
+      deleteNoticeHtml = `
+        <div class="alert-box alert-danger" style="margin-bottom: 14px;">
+          ⚠️ 注意：${deletedList.length} 项书签已标记为彻底物理删除，将永久移除且不载入书签栏目录树中。
+        </div>
+      `;
+    }
+
+    elements.treeContainer.innerHTML = deleteNoticeHtml + Object.keys(tree).map(catPath => {
       const items = tree[catPath];
       return `
         <div class="tree-folder">
@@ -320,6 +354,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 步骤 5 -> 步骤 6
   document.getElementById('btn-goto-save').addEventListener('click', () => {
+    const deletedList = DeadLinksModule.getDeleted();
+    if (deletedList.length > 0) {
+      elements.summaryDeleteCount.textContent = deletedList.length;
+      elements.deleteWarningBox.classList.remove('hidden');
+    } else {
+      elements.deleteWarningBox.classList.add('hidden');
+    }
     setStep(6);
   });
 
@@ -330,15 +371,29 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    const archivedList = DeadLinksModule.getArchived();
+    const deletedList = DeadLinksModule.getDeleted();
+
+    if (deletedList.length > 0 && !DeadLinksModule.isVerified()) {
+      alert('安全拦截：存在待彻底删除的书签，必须先进行人工逐项安全核验！');
+      DeadLinksModule.openVerifyModal(deletedList);
+      return;
+    }
+
     try {
       const res = await API.applyReconstruction({
         classified: state.classifiedPairs,
-        dead: state.probeResults.dead,
-        dead_action: state.deadAction
+        archived_bookmarks: archivedList,
+        deleted_bookmarks: deletedList,
+        manual_verified: DeadLinksModule.isVerified()
       });
 
+      let successMsg = `书签全流程整理完成并已安全原子写入！\n备份快照: ${res.backup_path}`;
+      if (res.deleted_count > 0) {
+        successMsg += `\n批量物理删除: ${res.deleted_count} 项\n专有审计日志: ${res.deleted_audit_path}`;
+      }
       showToast(`🎉 整理完成！已安全生成 ${res.folder_count} 个分类文件夹`, 'success');
-      alert(`书签全流程整理完成并已安全原子写入！\n备份文件: ${res.backup_path}\n重新打开 Chrome 即可查验全新书签栏。`);
+      alert(successMsg);
       await loadSystemStatus();
       setStep(1);
     } catch (e) {

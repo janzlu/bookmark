@@ -21,6 +21,7 @@ from bookmark_cleaner.config import (
     API_KEY,
     BASE_URL,
     BATCH_SIZE,
+    DEFAULT_SSL_VERIFY,
     MAX_CONCURRENT_REQUESTS,
     MODEL_NAME,
     PRESET_CATEGORIES,
@@ -46,17 +47,23 @@ class BookmarkManager(BookmarkWorkflow):
         bookmark_path: Path,
         api_key: str = API_KEY,
         base_url: str = BASE_URL,
-        model_name: str = MODEL_NAME
+        model_name: str = MODEL_NAME,
+        batch_size: int = BATCH_SIZE,
+        max_concurrency: int = MAX_CONCURRENT_REQUESTS,
+        timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
+        ssl_verify: bool = DEFAULT_SSL_VERIFY,
+        preset_categories: List[str] | None = None
     ):
         super().__init__(
             bookmark_path=bookmark_path,
             api_key=api_key,
             base_url=base_url,
             model_name=model_name,
-            batch_size=BATCH_SIZE,
-            max_concurrency=MAX_CONCURRENT_REQUESTS,
-            timeout_seconds=REQUEST_TIMEOUT_SECONDS,
-            preset_categories=PRESET_CATEGORIES
+            batch_size=batch_size,
+            max_concurrency=max_concurrency,
+            timeout_seconds=timeout_seconds,
+            ssl_verify=ssl_verify,
+            preset_categories=preset_categories
         )
 
     @staticmethod
@@ -66,8 +73,7 @@ class BookmarkManager(BookmarkWorkflow):
 
     def flatten_bookmarks(self, node: Dict[str, Any], result: List[Dict[str, Any]]) -> None:
         """递归提取全部 URL 类型的叶子节点并同步最大 ID"""
-        items = extract_flatten_bookmarks(node, self.id_manager)
-        result.extend(items)
+        result.extend(extract_flatten_bookmarks(node, self.id_manager))
 
     async def run_health_check(
         self, bookmarks: List[Dict[str, Any]]

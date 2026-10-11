@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 
 def backup_database(bookmark_path: Path, max_backups: int = 10) -> Path:
@@ -35,8 +35,11 @@ def backup_database(bookmark_path: Path, max_backups: int = 10) -> Path:
             reverse=True
         )
         for old_bak in existing_backups[max_backups:]:
-            old_bak.unlink(missing_ok=True)
-    except OSError:
+            try:
+                old_bak.unlink()
+            except (FileNotFoundError, PermissionError):
+                pass
+    except (FileNotFoundError, PermissionError):
         pass
 
     return backup_path
@@ -47,8 +50,11 @@ def load_bookmarks(bookmark_path: Path) -> Dict[str, Any]:
     if not bookmark_path.exists():
         raise FileNotFoundError(f"书签文件不存在: {bookmark_path}")
 
-    with open(bookmark_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(bookmark_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"书签文件格式损坏，无法解析为有效 JSON: {bookmark_path} ({e})") from e
 
 
 def save_bookmarks_atomic(bookmark_path: Path, data: Dict[str, Any]) -> None:
@@ -84,12 +90,73 @@ def save_bookmarks_atomic(bookmark_path: Path, data: Dict[str, Any]) -> None:
         if temp_path is not None and temp_path.exists():
             try:
                 temp_path.unlink()
-            except OSError:
+            except (FileNotFoundError, OSError):
                 pass
 
 
 def restore_backup(backup_path: Path, target_path: Path) -> None:
-    """从备份文件恢复书签"""
+    """从备份文件原子性恢复书签（含内容完整性校验）"""
     if not backup_path.exists():
         raise FileNotFoundError(f"备份文件不存在: {backup_path}")
-    shutil.copyfile(backup_path, target_path)
+
+    if backup_path.stat().st_size == 0:
+        raise ValueError(f"备份文件为空文件，拒绝恢复: {backup_path}")
+
+    # 预校验备份文件是否为有效 JSON 数据，防止覆写损坏文件
+    try:
+        with open(backup_path, "r", encoding="utf-8") as f:
+            json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"备份文件已损坏，拒绝恢复: {backup_path} ({e})") from e
+
+    parent_dir = target_path.parent
+    parent_dir.mkdir(parents=True, exist_ok=True)
+
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=parent_dir,
+            delete=False,
+            prefix="restore_temp_",
+            suffix=".json"
+        ) as tmp:
+            temp_path = Path(tmp.name)
+            shutil.copyfile(backup_path, temp_path)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+
+        os.replace(temp_path, target_path)
+        temp_path = None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+
+
+def save_deleted_audit_log(
+    bookmark_path: Path,
+    deleted_bookmarks: List[Dict[str, Any]]
+) -> str | None:
+    """
+    针对不可逆的物理删除操作，记录独立审计日志以备溯源恢复。
+    返回审计文件的绝对路径字符串，若无删除记录或写入异常返回 None。
+    """
+    if not deleted_bookmarks:
+        return None
+
+    del_ts = time.strftime("%Y%m%d_%H%M%S")
+    del_audit_path = bookmark_path.parent / f"Bookmarks.deleted_{del_ts}.json"
+    try:
+        with open(del_audit_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "deleted_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "count": len(deleted_bookmarks),
+                "manual_verified": True,
+                "deleted_bookmarks": deleted_bookmarks
+            }, f, ensure_ascii=False, indent=2)
+        return str(del_audit_path)
+    except OSError:
+        return None
+

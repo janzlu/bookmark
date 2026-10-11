@@ -160,6 +160,12 @@
           <div class="panel-header">
             <h2>双阶段高并发探活引擎 (HEAD 优先 + GET 降级)</h2>
             <div class="header-actions">
+              <select id="probe-sample-limit" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.9rem;">
+                <option value="20" selected>快速抽样测试 (前 20 条)</option>
+                <option value="50">抽样验证 (前 50 条)</option>
+                <option value="100">深度抽样 (前 100 条)</option>
+                <option value="all">全量检测 (全部书签)</option>
+              </select>
               <button id="btn-run-probe" class="btn btn-primary">执行高并发探活</button>
             </div>
           </div>
@@ -184,29 +190,58 @@
           <div class="panel-header">
             <div>
               <h2>异常与失效链接审计决策</h2>
-              <p class="text-muted">共发现 <span id="audit-dead-count" class="text-danger">0</span> 个异常链接</p>
+              <div class="audit-stats-badges">
+                <span class="status-badge badge-warning">共发现 <strong id="audit-dead-count">0</strong> 项异常</span>
+                <span class="status-badge badge-info">待安全归档: <strong id="badge-archived-count">0</strong></span>
+                <span class="status-badge badge-danger">待物理删除: <strong id="badge-deleted-count">0</strong></span>
+                <span class="status-badge badge-accent">保留: <strong id="badge-kept-count">0</strong></span>
+              </div>
             </div>
-            <div class="bulk-actions">
-              <label>批量策略：</label>
-              <select id="select-bulk-action" class="form-input">
-                <option value="archive">全部自动归档 (推荐)</option>
-                <option value="delete">全部彻底剔除</option>
-                <option value="keep">全部保留归类</option>
-              </select>
+            <div>
               <button id="btn-next-to-classify" class="btn btn-primary">下一步：AI 语义聚类 →</button>
             </div>
           </div>
+
+          <!-- 筛选标签与批量操作工具栏 -->
+          <div class="audit-toolbar glass-subcard">
+            <div class="filter-chips-group" id="dead-filter-chips">
+              <button class="filter-chip active" data-filter="all">全部 (<span id="filter-cnt-all">0</span>)</button>
+              <button class="filter-chip" data-filter="404">404/死链 (<span id="filter-cnt-404">0</span>)</button>
+              <button class="filter-chip" data-filter="timeout">连接超时 (<span id="filter-cnt-timeout">0</span>)</button>
+              <button class="filter-chip" data-filter="ssl">SSL/证书 (<span id="filter-cnt-ssl">0</span>)</button>
+              <button class="filter-chip filter-chip-danger" data-filter="delete">待物理删除 (<span id="filter-cnt-delete">0</span>)</button>
+            </div>
+            <div class="batch-actions-group">
+              <label class="checkbox-label">
+                <input type="checkbox" id="select-all-dead">
+                <span>全选当前</span>
+              </label>
+              <span class="text-muted text-sm">已选 <strong id="selected-dead-count">0</strong> 项</span>
+              <button id="btn-batch-delete" class="btn btn-danger btn-sm" title="需弹出核验清单确认">
+                🗑️ 批量彻底物理删除 (需人工核验)
+              </button>
+              <button id="btn-batch-archive" class="btn btn-secondary btn-sm">
+                📦 批量设为安全归档
+              </button>
+              <button id="btn-batch-keep" class="btn btn-outline btn-sm">
+                批量保留归类
+              </button>
+            </div>
+          </div>
+
           <div class="table-container scrollable">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>状态/原因</th>
-                  <th>书签标题</th>
-                  <th>链接地址</th>
+                  <th style="width: 44px; text-align: center;"><input type="checkbox" id="table-head-checkbox"></th>
+                  <th style="width: 140px;">状态/原因</th>
+                  <th style="min-width: 180px;">书签标题</th>
+                  <th style="min-width: 260px;">链接地址与复核</th>
+                  <th style="width: 180px;">处置策略</th>
                 </tr>
               </thead>
               <tbody id="dead-links-body">
-                <tr><td colspan="3" class="text-muted">暂无待处理的失效书签</td></tr>
+                <tr><td colspan="5" class="text-muted text-center">暂无待处理的失效书签</td></tr>
               </tbody>
             </table>
           </div>
@@ -261,6 +296,14 @@
           <p class="confirm-text">
             系统将强制自动备份当前书签库，并采用同分区临时文件 + <code>fsync</code> 刷盘 + <code>os.replace</code> 完成原子覆写。
           </p>
+          <div id="delete-warning-box" class="alert-box alert-danger hidden">
+            <div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 4px;">
+              ⚠️ 包含批量物理删除操作：共 <span id="summary-delete-count">0</span> 项书签将被永久移除！
+            </div>
+            <div class="text-sm">
+              已通过人工安全核验。写入时将自动创建全量时间戳备份及 <code>Bookmarks.deleted_*.json</code> 不可逆删除专有审计日志。
+            </div>
+          </div>
           <div id="chrome-running-warning" class="alert-box alert-danger hidden">
             ⚠️ 警告：检测到 Chrome 浏览器正在运行！Chrome 可能会覆盖保存结果。请先关闭 Chrome！
           </div>
@@ -271,6 +314,66 @@
       </section>
     </div>
   </main>
+
+  <!-- 批量物理删除人工安全核验弹窗 Modal -->
+  <div id="batch-delete-modal" class="modal-overlay hidden">
+    <div class="modal-card modal-lg glass-card">
+      <div class="modal-header">
+        <div class="modal-header-title">
+          <span class="modal-warning-icon">⚠️</span>
+          <div>
+            <h3>批量物理删除人工安全核验</h3>
+            <p class="modal-subtitle">请逐项核对待删除链接。物理删除不可逆，所选书签将彻底从 Chrome 中抹除！</p>
+          </div>
+        </div>
+        <button id="btn-close-delete-modal" class="btn btn-icon" aria-label="关闭">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="alert-box alert-danger" style="margin-bottom: 14px;">
+          <strong>安全提示：</strong> 物理删除后书签将不复存在。为保障数据安全，系统将强制生成 <code>Bookmarks.bak_*</code> 全量快照及 <code>Bookmarks.deleted_*.json</code> 审计文件以供随时追溯。
+        </div>
+
+        <div class="verify-table-header">
+          <span>待核验清单 (<span id="modal-delete-count">0</span> 项)</span>
+          <span class="text-muted text-sm">💡 点击右侧「测试 ↗」可在新标签页直接验证页面状态</span>
+        </div>
+
+        <div class="table-container modal-table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width: 40px; text-align: center;"><input type="checkbox" id="modal-select-all" checked></th>
+                <th style="width: 120px;">异常原因</th>
+                <th>书签标题</th>
+                <th>链接地址与人工测试</th>
+              </tr>
+            </thead>
+            <tbody id="modal-delete-list-body">
+              <!-- 动态填充 -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="verify-gate-box">
+          <label class="checkbox-label danger-gate">
+            <input type="checkbox" id="chk-manual-verified-confirm">
+            <span><strong>我已逐项人工核验上述链接</strong>，确认网页已失效且无需保留，同意执行彻底物理删除。</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer modal-actions-split">
+        <button id="btn-modal-downgrade-archive" class="btn btn-secondary">
+          📦 全部转为安全归档 (安全保底)
+        </button>
+        <div class="btn-group">
+          <button id="btn-modal-cancel" class="btn btn-outline">取消</button>
+          <button id="btn-modal-confirm-delete" class="btn btn-danger" disabled>
+            确认批量彻底删除 (<span id="modal-confirm-btn-count">0</span>)
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- 设置弹窗 Modal -->
   <div id="settings-modal" class="modal-overlay hidden">
@@ -313,6 +416,7 @@
   <div id="toast-container" class="toast-container"></div>
 
   <script src="/static/js/api.js"></script>
+  <script src="/static/js/dead-links.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

@@ -48,3 +48,24 @@ def test_restore_backup(tmp_path: Path):
     restore_backup(bak, target)
     assert target.exists()
     assert json.loads(target.read_text(encoding="utf-8")) == data
+
+
+def test_restore_backup_empty_or_corrupt_rejected(tmp_path: Path):
+    target = tmp_path / "Bookmarks"
+    empty_bak = tmp_path / "Bookmarks.bak_empty"
+    empty_bak.write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="为空文件"):
+        restore_backup(empty_bak, target)
+
+    corrupt_bak = tmp_path / "Bookmarks.bak_corrupt"
+    corrupt_bak.write_text("invalid json {{{", encoding="utf-8")
+    with pytest.raises(ValueError, match="已损坏"):
+        restore_backup(corrupt_bak, target)
+
+
+def test_load_bookmarks_invalid_json(tmp_path: Path):
+    target = tmp_path / "Bookmarks"
+    target.write_text("not json content", encoding="utf-8")
+    with pytest.raises(ValueError, match="书签文件格式损坏"):
+        load_bookmarks(target)
+

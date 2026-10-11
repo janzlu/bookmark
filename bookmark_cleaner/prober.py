@@ -42,19 +42,12 @@ async def probe_single_url(
                 async with session.head(url, allow_redirects=True) as resp:
                     if resp.status < 400 or resp.status in PASSTHROUGH_STATUSES:
                         return bookmark, True, f"HTTP {resp.status}"
-                    if resp.status == 405:
-                        # 405 表明服务器禁止 HEAD 方法，需降级为 GET
-                        raise aiohttp.ClientResponseError(
-                            resp.request_info, resp.history, status=405
-                        )
-                    # 4xx 状态码通常是永久性错误，不重试
-                    if 400 <= resp.status < 500:
+                    if 400 <= resp.status < 500 and resp.status != 405:
+                        # 4xx (除 405 Method Not Allowed 外) 属于明确客户端错误，不重试
                         return bookmark, False, f"HTTP {resp.status}"
+                    # 405 或 5xx 服务端异常降级进入 GET 探活
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                 # HEAD 阶段网络/协议错误，降级进入阶段 2 GET 探活
-                pass
-            except Exception:
-                # 其他异常同样降级进入 GET 探活
                 pass
 
             # 阶段 2: 降级尝试标准 GET 请求
@@ -74,7 +67,7 @@ async def probe_single_url(
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
                 return bookmark, False, "TimeoutError"
-            except Exception as e:
+            except (aiohttp.ClientError, OSError) as e:
                 if attempt < max_retries:
                     await asyncio.sleep(0.5 * (attempt + 1))
                     continue
@@ -112,7 +105,8 @@ async def run_health_check(
     async with aiohttp.ClientSession(
         headers=DEFAULT_HEADERS,
         timeout=timeout,
-        connector=connector
+        connector=connector,
+        cookie_jar=aiohttp.DummyCookieJar()
     ) as session:
         async def _probe_with_progress(bm: Dict[str, Any]):
             nonlocal completed_count

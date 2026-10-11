@@ -29,44 +29,15 @@ from .config import (
 )
 from .parser import IdManager, flatten_bookmarks, normalize_and_deduplicate
 from .prober import run_health_check
-from .storage import backup_database, load_bookmarks, restore_backup, save_bookmarks_atomic
-
-
-def is_chrome_running() -> bool:
-    """检查宿主机是否存在运行中的 Google Chrome 进程"""
-    try:
-        res = subprocess.run(
-            ["pgrep", "-fl", "Google Chrome"],
-            capture_output=True,
-            text=True,
-            timeout=2.0
-        )
-        return res.returncode == 0 and bool(res.stdout.strip())
-    except Exception:
-        return False
-
-
-def get_backup_list(bookmark_path: Path) -> List[Dict[str, Any]]:
-    """获取所有历史备份文件列表及元信息"""
-    parent = bookmark_path.parent
-    if not parent.exists():
-        return []
-
-    backups = []
-    for p in parent.glob("Bookmarks.bak_*"):
-        try:
-            stat = p.stat()
-            backups.append({
-                "filename": p.name,
-                "path": str(p),
-                "size_bytes": stat.st_size,
-                "modified_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
-            })
-        except OSError:
-            pass
-
-    backups.sort(key=lambda x: x["filename"], reverse=True)
-    return backups
+from .server_helpers import get_backup_list, is_chrome_running, send_sse_error, send_sse_event
+from .server_stream import stream_classify, stream_probe
+from .storage import (
+    backup_database,
+    load_bookmarks,
+    restore_backup,
+    save_bookmarks_atomic,
+    save_deleted_audit_log,
+)
 
 
 class BookmarkServer:
@@ -110,8 +81,12 @@ class BookmarkServer:
 
     async def handle_status(self, request: web.Request) -> web.Response:
         """获取系统状态、环境信息与配置"""
-        file_exists = self.bookmark_path.exists()
-        file_size = self.bookmark_path.stat().st_size if file_exists else 0
+        try:
+            file_size = self.bookmark_path.stat().st_size
+            file_exists = True
+        except (FileNotFoundError, OSError):
+            file_exists = False
+            file_size = 0
 
         data = {
             "chrome_running": is_chrome_running(),
@@ -189,64 +164,7 @@ class BookmarkServer:
         """流式异步探活：基于 SSE 实时输出单项检测结果与百分比进度"""
         if not self.bookmark_path.exists():
             return web.json_response({"error": "书签文件不存在"}, status=404)
-
-        try:
-            raw_data = load_bookmarks(self.bookmark_path)
-            bookmark_bar = raw_data.get("roots", {}).get("bookmark_bar", {})
-            flat_list = flatten_bookmarks(bookmark_bar)
-            deduped = normalize_and_deduplicate(flat_list)
-
-            body = await request.json() if request.can_read_body else {}
-            sample_limit = body.get("limit")
-            target_items = deduped[:sample_limit] if sample_limit else deduped
-
-            concurrency = int(body.get("concurrency", self.config["max_concurrency"]))
-            timeout = float(body.get("timeout", self.config["timeout_seconds"]))
-            ssl_verify = bool(body.get("ssl_verify", self.config["ssl_verify"]))
-
-            response = web.StreamResponse(
-                status=200,
-                headers={
-                    "Content-Type": "text/event-stream; charset=utf-8",
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"
-                }
-            )
-            await response.prepare(request)
-
-            async def on_progress(bm, is_alive, reason, completed, total):
-                event = {
-                    "type": "progress",
-                    "current": completed,
-                    "total": total,
-                    "is_alive": is_alive,
-                    "reason": reason,
-                    "name": bm.get("name", "") or "(无标题)",
-                    "url": bm.get("url", "")
-                }
-                await response.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
-
-            alive, dead = await run_health_check(
-                target_items,
-                max_concurrency=concurrency,
-                timeout_seconds=timeout,
-                ssl_verify=ssl_verify,
-                progress_callback=on_progress
-            )
-
-            complete_event = {
-                "type": "complete",
-                "total_tested": len(target_items),
-                "alive_count": len(alive),
-                "dead_count": len(dead),
-                "alive": alive,
-                "dead": dead
-            }
-            await response.write(f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n".encode("utf-8"))
-            return response
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await stream_probe(request, self.config, self.bookmark_path)
 
     async def handle_classify(self, request: web.Request) -> web.Response:
         """执行大语言模型批量语义聚类 (单次返回)"""
@@ -276,62 +194,7 @@ class BookmarkServer:
 
     async def handle_classify_stream(self, request: web.Request) -> web.StreamResponse:
         """流式大模型语义聚类：基于 SSE 实时输出批次完成与分类详情"""
-        try:
-            body = await request.json()
-            bookmarks = body.get("bookmarks", [])
-            if not bookmarks:
-                return web.json_response({"classified": []})
-
-            classifier = BookmarkClassifier(
-                api_key=self.config["api_key"],
-                base_url=self.config["base_url"],
-                model_name=self.config["model_name"],
-                preset_categories=self.config["preset_categories"]
-            )
-
-            batch_size = int(body.get("batch_size", self.config["batch_size"]))
-            total = len(bookmarks)
-
-            response = web.StreamResponse(
-                status=200,
-                headers={
-                    "Content-Type": "text/event-stream; charset=utf-8",
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"
-                }
-            )
-            await response.prepare(request)
-
-            classified_pairs = []
-            for i in range(0, total, batch_size):
-                batch = bookmarks[i:i + batch_size]
-                batch_mapping = classifier.classify_single_batch(batch)
-                batch_items = []
-                for bm in batch:
-                    cat = batch_mapping.get(str(bm["id"]), "其他/待整理")
-                    classified_pairs.append((bm, cat))
-                    batch_items.append({"name": bm.get("name", "") or "(无标题)", "category": cat})
-
-                batch_event = {
-                    "type": "progress",
-                    "current": min(i + batch_size, total),
-                    "total": total,
-                    "batch_items": batch_items
-                }
-                await response.write(f"data: {json.dumps(batch_event, ensure_ascii=False)}\n\n".encode("utf-8"))
-
-            complete_event = {
-                "type": "complete",
-                "classified": [
-                    {"bookmark": bm, "category": cat}
-                    for bm, cat in classified_pairs
-                ]
-            }
-            await response.write(f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n".encode("utf-8"))
-            return response
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=500)
+        return await stream_classify(request, self.config)
 
     async def handle_apply(self, request: web.Request) -> web.Response:
         """将整理结果原子化覆写持久化至 Chrome 书签文件"""
@@ -343,11 +206,31 @@ class BookmarkServer:
         try:
             body = await request.json()
             classified_data = body.get("classified", [])
-            dead_data = body.get("dead", [])
-            dead_action = body.get("dead_action", "archive")
+            manual_verified = bool(body.get("manual_verified", False))
 
-            # 1. 强制生成时间戳备份
+            # 兼容精细化批量列表与传统统一模式
+            deleted_data = body.get("deleted_bookmarks")
+            archived_data = body.get("archived_bookmarks")
+            if deleted_data is None and archived_data is None:
+                dead_data = body.get("dead", [])
+                dead_action = body.get("dead_action", "archive")
+                deleted_data = dead_data if dead_action == "delete" else []
+                archived_data = dead_data if dead_action == "archive" else []
+            else:
+                deleted_data = deleted_data or []
+                archived_data = archived_data or []
+
+            # 核心安全门禁：物理删除必须经过明确的人工核验确认
+            if deleted_data and not manual_verified:
+                return web.json_response({
+                    "error": "安全拦截：物理删除失效书签必须经过人工逐项核验！请在核验弹窗中确认核验无误后再提交。"
+                }, status=400)
+
+            # 1. 强制生成时间戳快照备份
             bak_path = backup_database(self.bookmark_path)
+
+            # 若执行物理删除，额外记录不可逆删除专有审计日志以备溯源恢复
+            deleted_audit_file = save_deleted_audit_log(self.bookmark_path, deleted_data)
 
             # 2. 读取当前原始数据
             raw_data = load_bookmarks(self.bookmark_path)
@@ -358,9 +241,9 @@ class BookmarkServer:
             pairs = [(item["bookmark"], item["category"]) for item in classified_data]
             new_children = assemble_tree(pairs, id_mgr)
 
-            # 4. 失效书签归档处理
-            if dead_action == "archive" and dead_data:
-                archive_folder = create_archive_folder(dead_data, id_mgr)
+            # 4. 失效书签归档处理 (仅对明确需要归档的书签挂载)
+            if archived_data:
+                archive_folder = create_archive_folder(archived_data, id_mgr)
                 new_children.append(archive_folder)
 
             # 5. 回写并原子保存
@@ -374,6 +257,9 @@ class BookmarkServer:
             return web.json_response({
                 "success": True,
                 "backup_path": str(bak_path),
+                "deleted_audit_path": deleted_audit_file,
+                "deleted_count": len(deleted_data),
+                "archived_count": len(archived_data),
                 "folder_count": len(new_children)
             })
         except Exception as e:
@@ -389,11 +275,15 @@ class BookmarkServer:
         try:
             body = await request.json()
             filename = body.get("filename")
-            if not filename:
+            if not filename or not isinstance(filename, str):
                 return web.json_response({"error": "缺少 filename 参数"}, status=400)
 
-            bak_path = self.bookmark_path.parent / filename
-            if not bak_path.exists():
+            # 严格防止路径穿越：限定必须为纯文件名且具有 Bookmarks.bak_ 前缀
+            if "/" in filename or "\\" in filename or ".." in filename or not filename.startswith("Bookmarks.bak_"):
+                return web.json_response({"error": "非法的备份文件名格式"}, status=400)
+
+            bak_path = (self.bookmark_path.parent / filename).resolve()
+            if bak_path.parent != self.bookmark_path.parent.resolve() or not bak_path.exists():
                 return web.json_response({"error": "备份文件不存在"}, status=404)
 
             restore_backup(bak_path, self.bookmark_path)

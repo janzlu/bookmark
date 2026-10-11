@@ -21,7 +21,11 @@ AUDIT_FILES = [
     "bookmark_cleaner/prober.py",
     "bookmark_cleaner/classifier.py",
     "bookmark_cleaner/builder.py",
+    "bookmark_cleaner/server_helpers.py",
+    "bookmark_cleaner/server_stream.py",
     "bookmark_cleaner/server.py",
+    "bookmark_cleaner/cli_args.py",
+    "bookmark_cleaner/cli_prompts.py",
     "bookmark_cleaner/cli.py",
     "bookmark_manager.py",
 ]

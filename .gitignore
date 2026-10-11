@@ -1,8 +1,50 @@
+# Python & Bytecode
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+
+# Virtual Environment
 .venv/
+venv/
+ENV/
+env/
+
+# Testing & Coverage
 .pytest_cache/
-*.bak_*
-Bookmarks.bak_*
+.coverage
+htmlcov/
+
+# Local Bookmarks & Backups (Sensitive User Data)
+Bookmarks
+Bookmarks.bak*
+*.bak*
+Bookmarks.deleted*
+*.deleted*.json
 bookmarks_temp_*
+restore_temp_*
+bookmarks*.html
+*.bookmark*
+
+# Credentials & Environment Variables (Sensitive)
+.env
+.env.*
+*.key
+*.pem
+*.cert
+secrets.json
+config.local.json
+
+# Operating System & IDE
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
