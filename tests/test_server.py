@@ -146,3 +146,42 @@ async def test_server_config_update(mock_bookmarks_file: Path):
     assert resp.status == 200
     assert server.config["model_name"] == "test-model-xyz"
     assert server.config["max_concurrency"] == 42
+
+
+@pytest.mark.asyncio
+async def test_server_probe_stream(mock_bookmarks_file: Path):
+    server = BookmarkServer(bookmark_path=mock_bookmarks_file)
+
+    async def mock_run_health_check(bookmarks, *args, **kwargs):
+        progress_cb = kwargs.get("progress_callback")
+        if progress_cb:
+            await progress_cb(bookmarks[0], True, "HTTP 200", 1, len(bookmarks))
+        return bookmarks, []
+
+    req = MagicMock()
+    req.can_read_body = True
+    req.json = AsyncMock(return_value={"limit": 5})
+
+    with patch("bookmark_cleaner.server.run_health_check", side_effect=mock_run_health_check):
+        with patch.object(web.StreamResponse, "prepare", new_callable=AsyncMock):
+            with patch.object(web.StreamResponse, "write", new_callable=AsyncMock) as mock_write:
+                resp = await server.handle_probe_stream(req)
+                assert resp.status == 200
+                assert mock_write.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_server_classify_stream(mock_bookmarks_file: Path):
+    server = BookmarkServer(bookmark_path=mock_bookmarks_file)
+
+    req = MagicMock()
+    req.json = AsyncMock(return_value={
+        "bookmarks": [{"id": "2", "name": "Google", "url": "https://google.com"}]
+    })
+
+    with patch("bookmark_cleaner.server.BookmarkClassifier.classify_single_batch", return_value={"2": "常用工具"}):
+        with patch.object(web.StreamResponse, "prepare", new_callable=AsyncMock):
+            with patch.object(web.StreamResponse, "write", new_callable=AsyncMock) as mock_write:
+                resp = await server.handle_classify_stream(req)
+                assert resp.status == 200
+                assert mock_write.call_count >= 2

@@ -14,30 +14,50 @@ const API = {
     return await res.json();
   },
 
-  async runProbe(payload = {}) {
-    const res = await fetch('/api/prober/start', {
+  async streamSSE(url, payload, onEvent) {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || '探活执行失败');
+      throw new Error(err.error || `请求失败: ${res.statusText}`);
     }
-    return await res.json();
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() || '';
+      for (const block of blocks) {
+        const trimmed = block.trim();
+        if (trimmed.startsWith('data:')) {
+          const jsonStr = trimmed.slice(5).trim();
+          if (jsonStr) {
+            try {
+              const data = JSON.parse(jsonStr);
+              onEvent(data);
+            } catch (e) {
+              console.warn('SSE parse error:', e);
+            }
+          }
+        }
+      }
+    }
   },
 
-  async runClassify(payload = {}) {
-    const res = await fetch('/api/classifier/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw new Error(err.error || '分类执行失败');
-    }
-    return await res.json();
+  async runProbeStream(payload, onEvent) {
+    return this.streamSSE('/api/prober/stream', payload, onEvent);
+  },
+
+  async runClassifyStream(payload, onEvent) {
+    return this.streamSSE('/api/classifier/stream', payload, onEvent);
   },
 
   async applyReconstruction(payload) {

@@ -1,18 +1,18 @@
 /**
- * Bookmark Studio 前端主逻辑与控制器
+ * Bookmark Studio 前端主逻辑与控制器 (支持实时 SSE 流式日志与进度反馈)
  */
 document.addEventListener('DOMContentLoaded', () => {
-  // 全局响应式状态
   const state = {
     currentStep: 1,
     status: null,
     summary: null,
     probeResults: { alive: [], dead: [] },
     classifiedPairs: [],
-    deadAction: 'archive'
+    deadAction: 'archive',
+    isProbing: false,
+    isClassifying: false
   };
 
-  // DOM 元素缓存
   const elements = {
     chromeBadge: document.getElementById('chrome-status-badge'),
     chromeStatusText: document.getElementById('chrome-status-text'),
@@ -25,12 +25,16 @@ document.addEventListener('DOMContentLoaded', () => {
     infoSize: document.getElementById('info-size'),
     infoChrome: document.getElementById('info-chrome'),
     backupBody: document.getElementById('backup-table-body'),
+    btnRunProbe: document.getElementById('btn-run-probe'),
+    probeStatusText: document.getElementById('probe-status-text'),
     probeProgressBar: document.getElementById('probe-progress-bar'),
     probePercent: document.getElementById('probe-status-percent'),
     probeLog: document.getElementById('probe-log-box'),
     auditDeadCount: document.getElementById('audit-dead-count'),
     deadLinksBody: document.getElementById('dead-links-body'),
     selectBulkAction: document.getElementById('select-bulk-action'),
+    btnRunClassify: document.getElementById('btn-run-classify'),
+    classifyStatusText: document.getElementById('classify-status-text'),
     classifyProgressBar: document.getElementById('classify-progress-bar'),
     classifyPercent: document.getElementById('classify-status-percent'),
     classifyLog: document.getElementById('classify-log-box'),
@@ -41,7 +45,6 @@ document.addEventListener('DOMContentLoaded', () => {
     toastContainer: document.getElementById('toast-container')
   };
 
-  // 消息提示 Helper
   function showToast(message, type = 'info') {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
@@ -53,7 +56,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 3500);
   }
 
-  // 步骤切换
   function setStep(stepNum) {
     state.currentStep = stepNum;
     document.querySelectorAll('.step-item').forEach(btn => {
@@ -64,13 +66,29 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  function appendLog(box, text, colorClass = '') {
+    const line = document.createElement('div');
+    line.className = `log-line ${colorClass}`;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+    box.appendChild(line);
+
+    // 限制最大历史输出行数，避免大量节点拖慢页面渲染
+    while (box.children.length > 120) {
+      box.removeChild(box.firstChild);
+    }
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function escapeHtml(str) {
+    return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
   // 1. 初始化系统状态
   async function loadSystemStatus() {
     try {
       const data = await API.getStatus();
       state.status = data;
 
-      // Chrome 运行状态指示
       if (data.chrome_running) {
         elements.chromeBadge.className = 'status-badge badge-warning';
         elements.chromeStatusText.textContent = 'Chrome 正在运行';
@@ -88,7 +106,6 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.infoSize.textContent = `${(data.file_size / 1024).toFixed(1)} KB`;
       elements.statBackups.textContent = data.backups.length;
 
-      // 渲染历史快照
       renderBackups(data.backups);
       renderPresetChips(data.config.preset_categories || []);
     } catch (e) {
@@ -148,39 +165,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 3. 探活流程
-  document.getElementById('btn-run-probe').addEventListener('click', async () => {
-    appendLog(elements.probeLog, '[探活启动] 正在调度高并发异步非阻塞 HTTP 检测...');
-    elements.probeProgressBar.style.width = '30%';
-    elements.probePercent.textContent = '30%';
+  // 3. 异步流式探活事件绑定
+  elements.btnRunProbe.addEventListener('click', async () => {
+    if (state.isProbing) return;
+    state.isProbing = true;
+    elements.btnRunProbe.disabled = true;
+    elements.btnRunProbe.textContent = '探活进行中...';
+
+    appendLog(elements.probeLog, '[探活启动] 调度高并发异步非阻塞 HTTP 探活，实时流式接收检测事件...');
+    elements.probeProgressBar.style.width = '0%';
+    elements.probePercent.textContent = '0%';
 
     try {
-      const res = await API.runProbe();
-      state.probeResults = { alive: res.alive, dead: res.dead };
-      elements.probeProgressBar.style.width = '100%';
-      elements.probePercent.textContent = '100%';
+      await API.runProbeStream({}, (event) => {
+        if (event.type === 'progress') {
+          const percent = Math.round((event.current / event.total) * 100);
+          elements.probeProgressBar.style.width = `${percent}%`;
+          elements.probePercent.textContent = `${percent}%`;
+          elements.probeStatusText.textContent = `正在检测: ${event.current} / ${event.total} (${percent}%)`;
 
-      appendLog(elements.probeLog, `[探活完成] 扫描总数: ${res.total_tested} | 存活: ${res.alive_count} | 失效: ${res.dead_count}`);
-      renderDeadLinks(res.dead);
-      setTimeout(() => setStep(3), 800);
+          const colorClass = event.is_alive ? 'text-accent' : 'text-danger';
+          const mark = event.is_alive ? '✓ 存活' : '✗ 异常';
+          appendLog(elements.probeLog, `[${mark} ${event.reason}] ${event.name} (${event.url})`, colorClass);
+        } else if (event.type === 'complete') {
+          state.probeResults = { alive: event.alive, dead: event.dead };
+          elements.probeProgressBar.style.width = '100%';
+          elements.probePercent.textContent = '100%';
+          elements.probeStatusText.textContent = `探活全部完成！存活: ${event.alive_count} | 失效: ${event.dead_count}`;
+          appendLog(elements.probeLog, `[探活全部完成] 总计扫描: ${event.total_tested} | 存活: ${event.alive_count} | 失效: ${event.dead_count}`, 'text-info');
+
+          renderDeadLinks(event.dead);
+          setTimeout(() => setStep(3), 900);
+        }
+      });
     } catch (e) {
-      appendLog(elements.probeLog, `[探活报错] ${e.message}`);
+      appendLog(elements.probeLog, `[探活中断报错] ${e.message}`, 'text-danger');
       showToast(e.message, 'danger');
+    } finally {
+      state.isProbing = false;
+      elements.btnRunProbe.disabled = false;
+      elements.btnRunProbe.textContent = '重新执行探活';
     }
   });
-
-  function appendLog(box, text) {
-    const line = document.createElement('div');
-    line.className = 'log-line';
-    line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
-  }
 
   function renderDeadLinks(deadList) {
     elements.auditDeadCount.textContent = deadList.length;
     if (!deadList.length) {
-      elements.deadLinksBody.innerHTML = '<tr><td colspan="3" class="text-accent">🎉 探活通过！未发现失效或死链书签。</td></tr>';
+      elements.deadLinksBody.innerHTML = '<tr><td colspan="3" class="text-accent">🎉 探活全部通过！未发现失效或死链书签。</td></tr>';
       return;
     }
 
@@ -193,43 +224,60 @@ document.addEventListener('DOMContentLoaded', () => {
     `).join('');
   }
 
-  function escapeHtml(str) {
-    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
-
   // 步骤 3 -> 步骤 4
   document.getElementById('btn-next-to-classify').addEventListener('click', () => {
     state.deadAction = elements.selectBulkAction.value;
     setStep(4);
   });
 
-  // 4. 语义分类流程
-  document.getElementById('btn-run-classify').addEventListener('click', async () => {
+  // 4. 异步流式语义分类事件绑定
+  elements.btnRunClassify.addEventListener('click', async () => {
+    if (state.isClassifying) return;
+    state.isClassifying = true;
+    elements.btnRunClassify.disabled = true;
+    elements.btnRunClassify.textContent = 'AI 语义分类中...';
+
     let targets = [...state.probeResults.alive];
     if (state.deadAction === 'keep') {
       targets.push(...state.probeResults.dead);
     }
-
-    if (!targets.length) {
-      targets = state.summary ? state.summary.items : [];
+    if (!targets.length && state.summary) {
+      targets = state.summary.items;
     }
 
-    appendLog(elements.classifyLog, `[分类启动] 开始对 ${targets.length} 条存活书签进行大模型语义聚类...`);
-    elements.classifyProgressBar.style.width = '40%';
-    elements.classifyPercent.textContent = '40%';
+    appendLog(elements.classifyLog, `[分类启动] 开始对 ${targets.length} 条书签进行大模型语义聚类...`);
+    elements.classifyProgressBar.style.width = '0%';
+    elements.classifyPercent.textContent = '0%';
 
     try {
-      const res = await API.runClassify({ bookmarks: targets });
-      state.classifiedPairs = res.classified;
-      elements.classifyProgressBar.style.width = '100%';
-      elements.classifyPercent.textContent = '100%';
+      await API.runClassifyStream({ bookmarks: targets }, (event) => {
+        if (event.type === 'progress') {
+          const percent = Math.round((event.current / event.total) * 100);
+          elements.classifyProgressBar.style.width = `${percent}%`;
+          elements.classifyPercent.textContent = `${percent}%`;
+          elements.classifyStatusText.textContent = `正在分类: ${event.current} / ${event.total} (${percent}%)`;
 
-      appendLog(elements.classifyLog, `[分类完成] 成功构建 ${res.classified.length} 条分类映射关系。`);
-      renderTreePreview(res.classified, state.probeResults.dead, state.deadAction);
-      setTimeout(() => setStep(5), 800);
+          for (const item of event.batch_items) {
+            appendLog(elements.classifyLog, `🤖 [分类规划] ${item.name} -> ${item.category}`, 'text-accent');
+          }
+        } else if (event.type === 'complete') {
+          state.classifiedPairs = event.classified;
+          elements.classifyProgressBar.style.width = '100%';
+          elements.classifyPercent.textContent = '100%';
+          elements.classifyStatusText.textContent = `分类完成！构建了 ${event.classified.length} 个分类映射。`;
+          appendLog(elements.classifyLog, `[分类完成] 成功完成全量分类规划。`, 'text-info');
+
+          renderTreePreview(event.classified, state.probeResults.dead, state.deadAction);
+          setTimeout(() => setStep(5), 900);
+        }
+      });
     } catch (e) {
-      appendLog(elements.classifyLog, `[分类异常] ${e.message}`);
+      appendLog(elements.classifyLog, `[分类异常报错] ${e.message}`, 'text-danger');
       showToast(e.message, 'danger');
+    } finally {
+      state.isClassifying = false;
+      elements.btnRunClassify.disabled = false;
+      elements.btnRunClassify.textContent = '重新执行语义分类';
     }
   });
 
@@ -257,13 +305,13 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="stat-desc">(${items.length} 项)</span>
           </div>
           <div class="tree-children">
-            ${items.slice(0, 10).map(bm => `
+            ${items.slice(0, 8).map(bm => `
               <div class="tree-item">
                 <span>🔗</span>
                 <span>${escapeHtml(bm.name || '(无标题)')}</span>
               </div>
             `).join('')}
-            ${items.length > 10 ? `<div class="tree-item text-muted">... 以及另外 ${items.length - 10} 项</div>` : ''}
+            ${items.length > 8 ? `<div class="tree-item text-muted">... 以及另外 ${items.length - 8} 项</div>` : ''}
           </div>
         </div>
       `;
@@ -278,7 +326,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 6. 原子覆写提交
   document.getElementById('btn-commit-apply').addEventListener('click', async () => {
     if (state.status && state.status.chrome_running) {
-      alert('检测到 Google Chrome 仍在运行！请彻底退出 Chrome（如 macOS 执行 killall "Google Chrome"）后再点击确认保存！');
+      alert('检测到 Google Chrome 仍在运行！请彻底退出 Chrome（如 macOS 终端执行 killall "Google Chrome"）后再点击确认保存！');
       return;
     }
 
@@ -289,8 +337,8 @@ document.addEventListener('DOMContentLoaded', () => {
         dead_action: state.deadAction
       });
 
-      showToast(`🎉 整理完成！已安全生成 ${res.folder_count} 个分类文件夹，备份至: ${res.backup_path}`, 'success');
-      alert(`书签全流程整理完成并已安全覆写！\n备份文件: ${res.backup_path}\n现在重新打开 Chrome 即可查验全新书签树！`);
+      showToast(`🎉 整理完成！已安全生成 ${res.folder_count} 个分类文件夹`, 'success');
+      alert(`书签全流程整理完成并已安全原子写入！\n备份文件: ${res.backup_path}\n重新打开 Chrome 即可查验全新书签栏。`);
       await loadSystemStatus();
       setStep(1);
     } catch (e) {

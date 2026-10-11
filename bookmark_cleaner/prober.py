@@ -87,11 +87,13 @@ async def run_health_check(
     bookmarks: List[Dict[str, Any]],
     max_concurrency: int = MAX_CONCURRENT_REQUESTS,
     timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
-    ssl_verify: bool = DEFAULT_SSL_VERIFY
+    ssl_verify: bool = DEFAULT_SSL_VERIFY,
+    progress_callback: Any = None
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     高并发异步调度器，批量检测书签健康状态。
     - ssl_verify: 默认为 False（符合规范：避免自建/内网证书过期导致误杀），可通过配置启用严格校验。
+    - progress_callback: 单项检测完成时的异步或同步回调函数 (bookmark, is_alive, reason, completed, total)
     返回: (存活书签列表, 失效书签列表)
     """
     if not bookmarks:
@@ -104,12 +106,28 @@ async def run_health_check(
     )
     connector = aiohttp.TCPConnector(ssl=ssl_verify, limit=max_concurrency)
 
+    completed_count = 0
+    total_count = len(bookmarks)
+
     async with aiohttp.ClientSession(
         headers=DEFAULT_HEADERS,
         timeout=timeout,
         connector=connector
     ) as session:
-        tasks = [probe_single_url(session, semaphore, bm) for bm in bookmarks]
+        async def _probe_with_progress(bm: Dict[str, Any]):
+            nonlocal completed_count
+            res = await probe_single_url(session, semaphore, bm)
+            completed_count += 1
+            if progress_callback:
+                try:
+                    cb_res = progress_callback(res[0], res[1], res[2], completed_count, total_count)
+                    if asyncio.iscoroutine(cb_res):
+                        await cb_res
+                except Exception:
+                    pass
+            return res
+
+        tasks = [_probe_with_progress(bm) for bm in bookmarks]
         results = await asyncio.gather(*tasks)
 
     alive: List[Dict[str, Any]] = []

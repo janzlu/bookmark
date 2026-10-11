@@ -93,7 +93,9 @@ class BookmarkServer:
         self.app.router.add_get("/api/status", self.handle_status)
         self.app.router.add_get("/api/bookmarks/summary", self.handle_summary)
         self.app.router.add_post("/api/prober/start", self.handle_probe)
+        self.app.router.add_post("/api/prober/stream", self.handle_probe_stream)
         self.app.router.add_post("/api/classifier/start", self.handle_classify)
+        self.app.router.add_post("/api/classifier/stream", self.handle_classify_stream)
         self.app.router.add_post("/api/pipeline/apply", self.handle_apply)
         self.app.router.add_post("/api/backups/restore", self.handle_restore)
         self.app.router.add_post("/api/config/update", self.handle_config_update)
@@ -183,8 +185,71 @@ class BookmarkServer:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    async def handle_probe_stream(self, request: web.Request) -> web.StreamResponse:
+        """流式异步探活：基于 SSE 实时输出单项检测结果与百分比进度"""
+        if not self.bookmark_path.exists():
+            return web.json_response({"error": "书签文件不存在"}, status=404)
+
+        try:
+            raw_data = load_bookmarks(self.bookmark_path)
+            bookmark_bar = raw_data.get("roots", {}).get("bookmark_bar", {})
+            flat_list = flatten_bookmarks(bookmark_bar)
+            deduped = normalize_and_deduplicate(flat_list)
+
+            body = await request.json() if request.can_read_body else {}
+            sample_limit = body.get("limit")
+            target_items = deduped[:sample_limit] if sample_limit else deduped
+
+            concurrency = int(body.get("concurrency", self.config["max_concurrency"]))
+            timeout = float(body.get("timeout", self.config["timeout_seconds"]))
+            ssl_verify = bool(body.get("ssl_verify", self.config["ssl_verify"]))
+
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream; charset=utf-8",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+            await response.prepare(request)
+
+            async def on_progress(bm, is_alive, reason, completed, total):
+                event = {
+                    "type": "progress",
+                    "current": completed,
+                    "total": total,
+                    "is_alive": is_alive,
+                    "reason": reason,
+                    "name": bm.get("name", "") or "(无标题)",
+                    "url": bm.get("url", "")
+                }
+                await response.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
+
+            alive, dead = await run_health_check(
+                target_items,
+                max_concurrency=concurrency,
+                timeout_seconds=timeout,
+                ssl_verify=ssl_verify,
+                progress_callback=on_progress
+            )
+
+            complete_event = {
+                "type": "complete",
+                "total_tested": len(target_items),
+                "alive_count": len(alive),
+                "dead_count": len(dead),
+                "alive": alive,
+                "dead": dead
+            }
+            await response.write(f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n".encode("utf-8"))
+            return response
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
     async def handle_classify(self, request: web.Request) -> web.Response:
-        """执行大语言模型批量语义聚类"""
+        """执行大语言模型批量语义聚类 (单次返回)"""
         try:
             body = await request.json()
             bookmarks = body.get("bookmarks", [])
@@ -206,6 +271,65 @@ class BookmarkServer:
                 for bm, cat in classified_pairs
             ]
             return web.json_response({"classified": result})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_classify_stream(self, request: web.Request) -> web.StreamResponse:
+        """流式大模型语义聚类：基于 SSE 实时输出批次完成与分类详情"""
+        try:
+            body = await request.json()
+            bookmarks = body.get("bookmarks", [])
+            if not bookmarks:
+                return web.json_response({"classified": []})
+
+            classifier = BookmarkClassifier(
+                api_key=self.config["api_key"],
+                base_url=self.config["base_url"],
+                model_name=self.config["model_name"],
+                preset_categories=self.config["preset_categories"]
+            )
+
+            batch_size = int(body.get("batch_size", self.config["batch_size"]))
+            total = len(bookmarks)
+
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream; charset=utf-8",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+            await response.prepare(request)
+
+            classified_pairs = []
+            for i in range(0, total, batch_size):
+                batch = bookmarks[i:i + batch_size]
+                batch_mapping = classifier.classify_single_batch(batch)
+                batch_items = []
+                for bm in batch:
+                    cat = batch_mapping.get(str(bm["id"]), "其他/待整理")
+                    classified_pairs.append((bm, cat))
+                    batch_items.append({"name": bm.get("name", "") or "(无标题)", "category": cat})
+
+                batch_event = {
+                    "type": "progress",
+                    "current": min(i + batch_size, total),
+                    "total": total,
+                    "batch_items": batch_items
+                }
+                await response.write(f"data: {json.dumps(batch_event, ensure_ascii=False)}\n\n".encode("utf-8"))
+
+            complete_event = {
+                "type": "complete",
+                "classified": [
+                    {"bookmark": bm, "category": cat}
+                    for bm, cat in classified_pairs
+                ]
+            }
+            await response.write(f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n".encode("utf-8"))
+            return response
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
