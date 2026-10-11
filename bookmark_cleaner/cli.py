@@ -287,10 +287,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"OpenAI 兼容接口 Base URL (默认: {BASE_URL})"
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=REQUEST_TIMEOUT_SECONDS,
+        help=f"探活请求超时时间秒数 (默认: {REQUEST_TIMEOUT_SECONDS})"
+    )
+    parser.add_argument(
         "--ssl-verify",
         action="store_true",
         default=DEFAULT_SSL_VERIFY,
         help="启用严格 SSL 证书验证 (默认关闭以避免误判内网自建服务)"
+    )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        help="启动 Web UI 智能管理工作台并在浏览器中访问"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Web UI 服务端口 (默认: 8080)"
     )
     return parser
 
@@ -300,6 +317,13 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    if args.ui:
+        from aiohttp import web
+        from .server import create_app
+        print(f"[*] 正在启动 Chrome 书签智能管理 Web UI 控制台: http://127.0.0.1:{args.port}")
+        web.run_app(create_app(args.path), host="127.0.0.1", port=args.port)
+        return
+
     workflow = BookmarkWorkflow(
         bookmark_path=args.path,
         api_key=API_KEY,
@@ -307,6 +331,7 @@ def main() -> None:
         model_name=args.model,
         batch_size=args.batch_size,
         max_concurrency=args.concurrency,
+        timeout_seconds=args.timeout,
         ssl_verify=args.ssl_verify
     )
 

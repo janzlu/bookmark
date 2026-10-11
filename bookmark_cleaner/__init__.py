@@ -26,12 +26,16 @@ from .storage import (
     save_bookmarks_atomic,
 )
 
+from .server import BookmarkServer, create_app
+
 __version__ = "1.0.0"
 
 __all__ = [
     "assemble_tree",
     "create_archive_folder",
     "BookmarkClassifier",
+    "BookmarkServer",
+    "create_app",
     "IdManager",
     "flatten_bookmarks",
     "normalize_and_deduplicate",
